@@ -2,14 +2,20 @@ import { createClient } from '@supabase/supabase-js';
 import { Anthropic } from '@anthropic-ai/sdk';
 import { NextRequest, NextResponse } from 'next/server';
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-);
+export const dynamic = 'force-dynamic';
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  );
+}
+
+function getAnthropic() {
+  return new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY!,
+  });
+}
 
 interface SearchResult {
   title: string;
@@ -22,6 +28,7 @@ async function searchCompanyInfo(companyName: string): Promise<{
   sources: SearchResult[];
 }> {
   const searchQuery = `${companyName} 企業情報 決算 売上 設立`;
+  const anthropic = getAnthropic();
 
   try {
     const response = await anthropic.messages.create({
@@ -86,6 +93,8 @@ async function parseCompanyData(
   latest_profit_billion: number;
   latest_profit_year: number;
 }>> {
+  const anthropic = getAnthropic();
+
   try {
     const response = await anthropic.messages.create({
       model: 'claude-opus-4-7',
@@ -156,6 +165,7 @@ export async function POST(request: NextRequest) {
     const parsedData = await parseCompanyData(companyName, summary);
 
     // Supabaseにレポートを保存
+    const supabase = getSupabase();
     const { data, error } = await supabase
       .from('company_reports')
       .insert({
