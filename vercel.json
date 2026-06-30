@@ -1,10 +1,5 @@
 {
   "buildCommand": "npm run build",
   "devCommand": "npm run dev",
-  "installCommand": "npm ci",
-  "env": [
-    "NEXT_PUBLIC_SUPABASE_URL",
-    "NEXT_PUBLIC_SUPABASE_ANON_KEY",
-    "ANTHROPIC_API_KEY"
-  ]
+  "installCommand": "npm ci"
 }
