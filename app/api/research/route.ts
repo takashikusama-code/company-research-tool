@@ -1,79 +1,107 @@
+import { Anthropic } from "@anthropic-ai/sdk";
+
 export async function POST(request: Request) {
   const body = await request.json();
-  const companyName = body.companyName || '';
+  const companyName = body.companyName || "";
 
   if (!companyName.trim()) {
-    return Response.json({ error: '企業名を入力してください' }, { status: 400 });
+    return Response.json({ error: "企業名を入力してください" }, { status: 400 });
   }
 
-  const mockData: { [key: string]: unknown } = {
-    'トヨタ自動車': {
-      id: 1,
-      company_name: 'トヨタ自動車',
-      company_name_kana: 'トヨタジドウシャ',
-      industry: '自動車製造',
-      establishment_date: '1937-08-28',
-      representative_name: '豊田章男',
-      search_summary: 'トヨタは世界トップの自動車メーカーです。',
-      latest_revenue_billion: 27500,
-      latest_revenue_year: 2023,
-      latest_profit_billion: 2500,
-      latest_profit_year: 2023,
-      report_status: 'completed',
-      created_at: new Date().toISOString(),
-    },
-    'ソニー': {
-      id: 2,
-      company_name: 'ソニーグループ',
-      company_name_kana: 'ソニーグループ',
-      industry: '電子機器・映画・音楽',
-      establishment_date: '1946-05-07',
-      representative_name: '吉田憲一郎',
-      search_summary: 'ソニーは多角的な事業を展開しています。',
-      latest_revenue_billion: 28000,
-      latest_revenue_year: 2023,
-      latest_profit_billion: 2800,
-      latest_profit_year: 2023,
-      report_status: 'completed',
-      created_at: new Date().toISOString(),
-    },
-    'Apple': {
-      id: 3,
-      company_name: 'Apple Inc.',
-      company_name_kana: 'アップル',
-      industry: 'コンピュータ・電子機器',
-      establishment_date: '1976-04-01',
-      representative_name: 'Tim Cook',
-      search_summary: 'Appleはテクノロジー企業です。',
-      latest_revenue_billion: 394000,
-      latest_revenue_year: 2023,
-      latest_profit_billion: 115000,
-      latest_profit_year: 2023,
-      report_status: 'completed',
-      created_at: new Date().toISOString(),
-    },
-  };
+  try {
+    const client = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
 
-  const name = companyName.toLowerCase();
-  for (const key in mockData) {
-    if (key.toLowerCase().includes(name) || name.includes(key.toLowerCase())) {
-      return Response.json(mockData[key]);
+    const message = await client.messages.create({
+      model: "claude-opus-4-8",
+      max_tokens: 4000,
+      tools: [
+        {
+          name: "search_web",
+          description: "Search the web for company information",
+          input_schema: {
+            type: "object",
+            properties: {
+              query: {
+                type: "string",
+                description: "Search query",
+              },
+            },
+            required: ["query"],
+          },
+        },
+      ],
+      messages: [
+        {
+          role: "user",
+          content: `企業「${companyName}」について、求職者向けの企業調査レポートを作成してください。
+
+以下の形式で出力してください：
+
+【求職者向けの短め紹介文】
+150～250文字程度で、求職者にそのまま伝えられる自然な文章
+
+【会社概要】
+- 企業名
+- 所在地
+- 設立年
+- 代表者名
+- 従業員数
+- 事業内容（簡潔に）
+
+【事業内容】
+主力事業の詳細説明
+
+【採用・求人情報】
+募集職種、仕事内容、働き方など
+
+【社風・カルチャー】
+会社の価値観、働く環境、チーム構成
+
+【代表者・経営陣】
+代表者名、経歴、経営理念、考え方
+
+【求職者に伝える魅力】
+事業の魅力、成長環境、社風、代表の魅力など
+
+【向いていそうな人】
+どんな志向の求職者に合いそうか
+
+【確認した方がよい点】
+公開情報では分からない点や企業に確認すべき点
+
+【参考情報源】
+情報の出所を記載
+
+詳細で実践的なレポートを作成してください。`,
+        },
+      ],
+    });
+
+    // Extract text response
+    let reportText = "";
+    for (const block of message.content) {
+      if (block.type === "text") {
+        reportText = block.text;
+      }
     }
-  }
 
-  return Response.json({
-    id: Math.floor(Math.random() * 10000),
-    company_name: companyName,
-    company_name_kana: companyName,
-    industry: '不明',
-    establishment_date: null,
-    representative_name: null,
-    search_summary: `${companyName}についての情報が見つかりました。`,
-    latest_revenue_billion: null,
-    latest_revenue_year: null,
-    latest_profit_billion: null,
-    latest_profit_year: null,
-    report_status: 'completed',
-    created_at: new Date().toISOString(),
-  });
+    return Response.json({
+      id: Math.floor(Math.random() * 10000),
+      company_name: companyName,
+      search_summary: reportText,
+      report_status: "completed",
+      created_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Error:", error);
+    return Response.json(
+      {
+        error:
+          error instanceof Error ? error.message : "企業調査に失敗しました",
+      },
+      { status: 500 }
+    );
+  }
 }
