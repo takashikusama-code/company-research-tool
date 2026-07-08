@@ -1,4 +1,49 @@
-import { Anthropic } from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+export const dynamic = "force-dynamic";
+
+async function getCompanyReportFromGemini(companyName: string): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY が設定されていません");
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.0-flash",
+    generationConfig: {
+      maxOutputTokens: 2000,
+    }
+  });
+
+  const prompt = `「${companyName}」という企業について、求職者向けの調査レポートを日本語で作成してください。
+
+以下の情報を含めてください：
+- 企業概要（業種、事業内容、設立年など）
+- 事業内容・サービス
+- 企業規模（従業員数、売上など）
+- 採用情報・人材採用の積極性
+- 社風・カルチャー・働き方
+- 給与・福利厚生
+- 転職市場での評判
+- 求職者にとっての魅力・メリット
+- 懸念点・デメリット（あれば）
+
+簡潔で実践的な内容でお願いします。各項目は見出しを付けて整理してください。`;
+
+  console.log("🔍 Gemini API で企業情報を検索中...");
+
+  const result = await model.generateContent(prompt);
+  const response = result.response;
+  const text = response.text();
+
+  if (!text) {
+    throw new Error("Gemini からのレスポンスが空です");
+  }
+
+  return text;
+}
 
 export async function POST(request: Request) {
   const body = await request.json();
@@ -9,97 +54,25 @@ export async function POST(request: Request) {
   }
 
   try {
-    const client = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    console.log("📝 企業名:", companyName);
 
-    const message = await client.messages.create({
-      model: "claude-opus-4-8",
-      max_tokens: 4000,
-      tools: [
-        {
-          name: "search_web",
-          description: "Search the web for company information",
-          input_schema: {
-            type: "object",
-            properties: {
-              query: {
-                type: "string",
-                description: "Search query",
-              },
-            },
-            required: ["query"],
-          },
-        },
-      ],
-      messages: [
-        {
-          role: "user",
-          content: `企業「${companyName}」について、求職者向けの企業調査レポートを作成してください。
-
-以下の形式で出力してください：
-
-【求職者向けの短め紹介文】
-150～250文字程度で、求職者にそのまま伝えられる自然な文章
-
-【会社概要】
-- 企業名
-- 所在地
-- 設立年
-- 代表者名
-- 従業員数
-- 事業内容（簡潔に）
-
-【事業内容】
-主力事業の詳細説明
-
-【採用・求人情報】
-募集職種、仕事内容、働き方など
-
-【社風・カルチャー】
-会社の価値観、働く環境、チーム構成
-
-【代表者・経営陣】
-代表者名、経歴、経営理念、考え方
-
-【求職者に伝える魅力】
-事業の魅力、成長環境、社風、代表の魅力など
-
-【向いていそうな人】
-どんな志向の求職者に合いそうか
-
-【確認した方がよい点】
-公開情報では分からない点や企業に確認すべき点
-
-【参考情報源】
-情報の出所を記載
-
-詳細で実践的なレポートを作成してください。`,
-        },
-      ],
-    });
-
-    // Extract text response
-    let reportText = "";
-    for (const block of message.content) {
-      if (block.type === "text") {
-        reportText = block.text;
-      }
-    }
+    const searchSummary = await getCompanyReportFromGemini(companyName);
 
     return Response.json({
       id: Math.floor(Math.random() * 10000),
       company_name: companyName,
-      search_summary: reportText,
+      search_summary: searchSummary,
       report_status: "completed",
       created_at: new Date().toISOString(),
     });
   } catch (error) {
-    console.error("Error:", error);
+    console.error("API Error:", error);
+    const errorMessage = error instanceof Error ? error.message : "企業調査に失敗しました";
+    console.error("詳細:", errorMessage);
+
     return Response.json(
       {
-        error:
-          error instanceof Error ? error.message : "企業調査に失敗しました",
+        error: errorMessage,
       },
       { status: 500 }
     );
