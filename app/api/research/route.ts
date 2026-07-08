@@ -205,13 +205,28 @@ function generateCompanyReport(
   companyName: string,
   wikipediaText: string
 ): string {
-  const data =
-    companyDatabase[companyName] ||
-    companyDatabase[
-      Object.keys(companyDatabase).find(
-        (key) => key.toLowerCase() === companyName.toLowerCase()
-      ) || ""
-    ];
+  // 企業名の正規化と別名対応
+  const aliasMap: Record<string, string> = {
+    ソニー: "ソニー",
+    Sony: "ソニー",
+    トヨタ: "トヨタ自動車",
+    トヨタ自動車: "トヨタ自動車",
+    Toyota: "トヨタ自動車",
+    日銀: "日本銀行",
+    BOJ: "日本銀行",
+    日本銀行: "日本銀行",
+  };
+
+  let normalizedName = aliasMap[companyName] || companyName;
+  let data = companyDatabase[normalizedName];
+
+  // 直接マッチなければ大文字小文字を無視して検索
+  if (!data) {
+    const key = Object.keys(companyDatabase).find(
+      (k) => k.toLowerCase() === companyName.toLowerCase()
+    );
+    data = key ? companyDatabase[key] : undefined;
+  }
 
   // データベースにない場合は Wikipedia テキストから生成
   if (!data) {
