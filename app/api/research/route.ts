@@ -230,14 +230,16 @@ function generateCompanyReport(
   };
 
   let normalizedName = aliasMap[companyName] || companyName;
-  let data = companyDatabase[normalizedName];
+  let data: CompanyInfo | undefined = companyDatabase[normalizedName];
 
   // 直接マッチなければ大文字小文字を無視して検索
   if (!data) {
     const key = Object.keys(companyDatabase).find(
       (k) => k.toLowerCase() === companyName.toLowerCase()
     );
-    data = key ? companyDatabase[key] : undefined;
+    if (key) {
+      data = companyDatabase[key];
+    }
   }
 
   // データベースにない場合は Wikipedia テキストから生成
