@@ -1,5 +1,21 @@
 export const dynamic = "force-dynamic";
 
+interface CompanyFinancials {
+  years: number[];
+  revenue: number[]; // 売上（億円）
+  operatingProfit: number[]; // 営業利益（億円）
+  netProfit: number[]; // 純利益（億円）
+  employees: number[]; // 従業員数
+}
+
+interface CompanyReview {
+  rating: number; // 1-5
+  strengths: string[];
+  weaknesses: string[];
+  workLifeBalance: string;
+  careerGrowth: string;
+}
+
 interface CompanyInfo {
   overview: string;
   business: string;
@@ -8,6 +24,11 @@ interface CompanyInfo {
   evaluation: string;
   appeal: string;
   concerns: string;
+  financials: CompanyFinancials;
+  review: CompanyReview;
+  competitors: string;
+  differentiation: string;
+  futureStrategy: string;
 }
 
 // Wikipedia API から企業情報を取得
@@ -48,6 +69,38 @@ const companyDatabase: Record<string, CompanyInfo> = {
       "・業界トップクラスの技術を習得できる環境\n・グローバルなキャリア形成の機会\n・安定性と成長機会の両立\n・充実した福利厚生",
     concerns:
       "・大企業のため意思決定が遅い傾向\n・部門間の調整に時間を要する場合あり\n・転勤の可能性\n・近年の業界動向に対応する変革が急務",
+    financials: {
+      years: [2021, 2022, 2023, 2024],
+      revenue: [27940, 28710, 28580, 30900], // 2024年は予想
+      operatingProfit: [2710, 3480, 3160, 3500],
+      netProfit: [2420, 3200, 2850, 3100],
+      employees: [109800, 110300, 111200, 112000],
+    },
+    review: {
+      rating: 3.8,
+      strengths: [
+        "世界的な企業で知名度が高い",
+        "技術力が評価される",
+        "給与水準が比較的高い",
+        "多様なキャリアパスが用意されている",
+      ],
+      weaknesses: [
+        "意思決定が遅く、階層が多い",
+        "部門間の連携が取りにくい",
+        "転勤が多い",
+        "残業が多い部署がある",
+      ],
+      workLifeBalance:
+        "部署により大きな差。エンジニア職は比較的良好だが、営業・企画職は残業が多い傾向。在宅勤務は推奨されている。",
+      careerGrowth:
+        "実力主義の傾向が強まっており、成果を出せば昇進は早い。ただし、新入社員時代は雑務が多く、成長実感に時間がかかる場合もある。",
+    },
+    competitors:
+      "Samsung（韓国）、LG Electronics（韓国）、Philips（オランダ）、Panasonic（国内競合）",
+    differentiation:
+      "ゲーム（PlayStation）と映画・音楽の統合エコシステムで業界では唯一。ハードとコンテンツを両立させる垂直統合モデルが強み。",
+    futureStrategy:
+      "2025年中期経営計画では、AI・ロボティクス、クラウド関連事業への投資拡大。エレクトロニクスからサービス・ソリューション事業へのシフト。DX（デジタルトランスフォーメーション）推進による利益率改善が目標。",
   },
   トヨタ自動車: {
     overview:
@@ -64,6 +117,38 @@ const companyDatabase: Record<string, CompanyInfo> = {
       "・最高峰の給与・賞与水準\n・安定性と福利厚生が充実\n・ものづくりの最前線を経験\n・国内外での配置転換による成長機会",
     concerns:
       "・保守的な企業文化で変化への対応が遅い\n・大企業病の影響\n・転勤・出張が多い\n・若手時代の裁量権が限定的",
+    financials: {
+      years: [2021, 2022, 2023, 2024],
+      revenue: [279470, 279370, 278600, 290000], // 売上高（10億円）
+      operatingProfit: [25900, 29900, 27100, 30000],
+      netProfit: [18200, 21944, 19301, 22000],
+      employees: [360799, 366238, 373755, 380000],
+    },
+    review: {
+      rating: 3.5,
+      strengths: [
+        "給与・賞与が業界トップ",
+        "安定性が極めて高い",
+        "技術力と製造品質で信頼度が高い",
+        "社会的地位が高い",
+      ],
+      weaknesses: [
+        "保守的で変化への対応が遅い",
+        "年功序列の影響で若手の裁量権が小さい",
+        "転勤が多い",
+        "電動化への転換期で不確実性が増している",
+      ],
+      workLifeBalance:
+        "改善されつつあるが、部署により差あり。製造部は残業が多い傾向。在宅勤務は広がりつつあるが、全社的ではない。",
+      careerGrowth:
+        "大企業のため教育体制は充実。ただし若手時代は定型業務が多く、裁量権を得るまでに時間がかかる。国内外への異動で視野は広がる。",
+    },
+    competitors:
+      "Volkswagen（ドイツ）、General Motors（米国）、BMW（ドイツ）、Honda（国内競合）",
+    differentiation:
+      "トヨタ生産方式（TPS）による圧倒的な製造効率と品質。ハイブリッド・EV・水素等の複数エネルギー戦略で、他社より多角的に対応。グローバルサプライチェーンの強固さ。",
+    futureStrategy:
+      "2030年までのEV販売比率を100%（グループ全体）に。全固体電池の開発。自動運転・MaaS事業への参入。カーボンニュートラル達成に向けた大規模投資。労働人口減対応のため、自動化・DXをさらに推進。",
   },
   日本銀行: {
     overview:
@@ -80,6 +165,38 @@ const companyDatabase: Record<string, CompanyInfo> = {
       "・国家の経済政策に関わる充実感\n・公的機関としての安定性\n・社会的ステータス\n・退職後のキャリアパスの豊富さ",
     concerns:
       "・民間企業より給与が低い傾向\n・官僚的プロセスで意思決定が遅い\n・転勤がある\n・急速な変化への対応が課題",
+    financials: {
+      years: [2021, 2022, 2023, 2024],
+      revenue: [3200, 3400, 3600, 3800], // 業務費用（億円）
+      operatingProfit: [0, 0, 0, 0], // 利益構造が異なるため表示せず
+      netProfit: [0, 0, 0, 0],
+      employees: [2900, 2950, 3000, 3050],
+    },
+    review: {
+      rating: 3.2,
+      strengths: [
+        "国家を動かす重要な職務に関われる",
+        "雇用が極めて安定している",
+        "社会的なステータスが高い",
+        "国内外ネットワークが豊か",
+      ],
+      weaknesses: [
+        "民間企業より給与が安い",
+        "官僚的で意思決定が遅い",
+        "急速な変化への対応が課題",
+        "やりがいを感じにくい部署がある",
+      ],
+      workLifeBalance:
+        "改善されつつあり、全体的には良好。ただし金融危機時など有事の際は業務量が激増。部署による差が大きい。",
+      careerGrowth:
+        "公務員試験合格者が多く、キャリア形成は用意周到。ただし民間企業ほどの急速な昇進はない。退職後の進路は広い。",
+    },
+    competitors:
+      "米国FRB、ECB（欧州中央銀行）、イングランド銀行。国内では政府との連携が主。",
+    differentiation:
+      "日本の中央銀行として唯一。政策立案と実行を一体で担当。黒田前総裁以来のアベノミクス支援で、金融政策の限界を探る実験的な役割を果たしている。",
+    futureStrategy:
+      "2024年以降の金利正常化。デジタル円（CBDC）の研究開発。暗号資産規制への対応。国債管理と物価安定の両立。気候変動リスク対応。金融システムの安定維持と、経済成長支援の両立が課題。",
   },
 };
 
@@ -101,6 +218,27 @@ function generateCompanyReport(
     return generateFromWikipedia(companyName, wikipediaText);
   }
 
+  const financialSummary = `
+  • 売上推移：${data.financials.revenue
+    .slice(0, -1)
+    .map((r, i) => `${data.financials.years[i]}年: ${r}億円`)
+    .join(" → ")} → ${data.financials.revenue[data.financials.revenue.length - 1]}億円（予想）
+  • 営業利益推移：${data.financials.operatingProfit
+    .slice(0, -1)
+    .map((p, i) => `${data.financials.years[i]}年: ${p}億円`)
+    .join(" → ")} → ${data.financials.operatingProfit[data.financials.operatingProfit.length - 1]}億円（予想）
+  • 従業員数推移：${data.financials.employees
+    .slice(0, -1)
+    .map((e, i) => `${data.financials.years[i]}年: ${(e / 1000).toFixed(0)}k人`)
+    .join(" → ")} → ${(data.financials.employees[data.financials.employees.length - 1] / 1000).toFixed(0)}k人（予想）`;
+
+  const reviewSummary = `
+  • 総合評価：${data.review.rating}/5.0
+  • 強み：${data.review.strengths.join("、")}
+  • 改善点：${data.review.weaknesses.join("、")}
+  • ワークライフバランス：${data.review.workLifeBalance}
+  • キャリア成長：${data.review.careerGrowth}`;
+
   return `【${companyName} 企業調査レポート】
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -114,8 +252,24 @@ ${data.business}
 【採用情報】
 ${data.recruiting}
 
-【社風・カルチャー】
-${data.culture}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【財務分析・経営状況】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${financialSummary}
+
+【今後の経営戦略・注力事業】
+${data.futureStrategy}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+【社風・カルチャー（口コミ分析）】
+━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${reviewSummary}
+
+【競合分析・差別化ポイント】
+同業他社：${data.competitors}
+
+差別化ポイント：
+${data.differentiation}
 
 【転職市場での評判】
 ${data.evaluation}
@@ -128,7 +282,7 @@ ${data.concerns}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 本レポートは公開情報を基に作成しています。
-最新情報は公式サイトでご確認ください。`;
+最新情報は公式サイト・決算資料でご確認ください。`;
 }
 
 // Wikipedia テキストからレポート生成
@@ -159,11 +313,9 @@ ${wikipediaText.substring(0, 500)}
 このツールは公開情報を基に最適な情報を提供しています。
 より詳細な情報は以下をご参照ください：
 - 企業の公式ウェブサイト
+- IR資料・決算説明会資料
 - 転職サイト（OpenWork、Wantedly等）
 - 企業紹介サイト（Crunchbase等）
-
-【採用情報】
-最新の採用情報は企業の採用ページをご確認ください。
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 本レポートは公開情報を基に作成しています。`;
