@@ -29,6 +29,9 @@ interface CompanyInfo {
   competitors: string;
   differentiation: string;
   futureStrategy: string;
+  industry: string;
+  foundedYear: number;
+  representative: string;
 }
 
 // Wikipedia API から企業情報を取得
@@ -57,6 +60,9 @@ const companyDatabase: Record<string, CompanyInfo> = {
   ソニー: {
     overview:
       "ソニー株式会社は、日本を代表する大手電機メーカー。1946年設立。東京都港区に本社。従業員数は約11万人。世界有数の総合電機メーカーであり、音声・映像・ゲーム・金融など多岐にわたる事業を展開。",
+    industry: "電子機器・映画・音楽",
+    foundedYear: 1946,
+    representative: "吉田憲一郎",
     business:
       "エレクトロニクス事業（テレビ、カメラ、ヘッドフォンなど）、ゲーム&ネットワークサービス事業（PlayStation）、映画・音楽事業、金融事業（保険、銀行）など多角的な事業ポートフォリオを有する。",
     recruiting:
@@ -105,6 +111,9 @@ const companyDatabase: Record<string, CompanyInfo> = {
   トヨタ自動車: {
     overview:
       "トヨタ自動車株式会社は、世界最大級の自動車メーカー。1937年設立。愛知県豊田市に本社。従業員数は約37万人（グループ）。ハイブリッド車などの環境対応車で業界をリード。",
+    industry: "自動車・製造",
+    foundedYear: 1937,
+    representative: "豊田章男",
     business:
       "乗用車、商用車、SUVなどの製造・販売。トヨタ生産方式（TPS）で知られる。最近はEV・水素自動車の開発にも注力。金融・レンタカー事業も展開。",
     recruiting:
@@ -153,6 +162,9 @@ const companyDatabase: Record<string, CompanyInfo> = {
   日本銀行: {
     overview:
       "日本銀行は日本の中央銀行。1882年設立。東京都中央区に本店。正職員数約3,000人。金融政策の実行、銀行券の発行などを担当する政策機関。",
+    industry: "中央銀行・金融機関",
+    foundedYear: 1882,
+    representative: "植田和男",
     business:
       "金融政策の実行、金融システムの安定維持、決済システムの管理、統計情報の提供など。国家の経済政策を実行する重要な役割を担う。",
     recruiting:
@@ -355,9 +367,50 @@ export async function POST(request: Request) {
 
     const searchSummary = generateCompanyReport(companyName, wikipediaInfo);
 
+    // 企業名の正規化
+    const aliasMap: Record<string, string> = {
+      ソニー: "ソニー",
+      Sony: "ソニー",
+      トヨタ: "トヨタ自動車",
+      トヨタ自動車: "トヨタ自動車",
+      Toyota: "トヨタ自動車",
+      日銀: "日本銀行",
+      BOJ: "日本銀行",
+      日本銀行: "日本銀行",
+    };
+
+    const normalizedName = aliasMap[companyName] || companyName;
+    const companyData =
+      companyDatabase[normalizedName] ||
+      companyDatabase[
+        Object.keys(companyDatabase).find(
+          (k) => k.toLowerCase() === companyName.toLowerCase()
+        ) || ""
+      ];
+
     return Response.json({
       id: Math.floor(Math.random() * 10000),
       company_name: companyName,
+      company_name_kana: companyData?.overview?.substring(0, 10) || "",
+      industry: companyData?.industry || "",
+      establishment_date: companyData
+        ? `${companyData.foundedYear}年`
+        : "",
+      representative_name: companyData?.representative || "",
+      latest_revenue_billion: companyData
+        ? companyData.financials.revenue[companyData.financials.revenue.length - 1]
+        : 0,
+      latest_revenue_year: companyData
+        ? companyData.financials.years[companyData.financials.years.length - 1]
+        : 0,
+      latest_profit_billion: companyData
+        ? companyData.financials.operatingProfit[
+            companyData.financials.operatingProfit.length - 1
+          ]
+        : 0,
+      latest_profit_year: companyData
+        ? companyData.financials.years[companyData.financials.years.length - 1]
+        : 0,
       search_summary: searchSummary,
       report_status: "completed",
       created_at: new Date().toISOString(),
@@ -375,4 +428,16 @@ export async function POST(request: Request) {
       { status: 500 }
     );
   }
+}
+
+// ヘルパー関数：テキストから年号を抽出
+function extractYear(text: string): string {
+  const match = text.match(/(\d{4})年/);
+  return match ? `${match[1]}年` : "";
+}
+
+// ヘルパー関数：テキストから人名を抽出
+function extractName(text: string): string {
+  const match = text.match(/代表[者:：]([^\n。、、]+)/);
+  return match ? match[1] : "";
 }
