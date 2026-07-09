@@ -2,14 +2,14 @@ export const dynamic = "force-dynamic";
 
 interface CompanyFinancials {
   years: number[];
-  revenue: number[]; // 売上（億円）
-  operatingProfit: number[]; // 営業利益（億円）
-  netProfit: number[]; // 純利益（億円）
-  employees: number[]; // 従業員数
+  revenue: number[];
+  operatingProfit: number[];
+  netProfit: number[];
+  employees: number[];
 }
 
 interface CompanyReview {
-  rating: number; // 1-5
+  rating: number;
   strengths: string[];
   weaknesses: string[];
   workLifeBalance: string;
@@ -34,6 +34,64 @@ interface CompanyInfo {
   representative: string;
 }
 
+// Claude API を使って企業情報を検索
+async function searchWithClaude(companyName: string): Promise<string> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.log("Claude API key not found");
+    return "";
+  }
+
+  try {
+    const response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-opus-4-1-20250805",
+        max_tokens: 1024,
+        tools: [
+          {
+            name: "web_search",
+            description: "Search the web for information",
+            input_schema: {
+              type: "object",
+              properties: {
+                query: {
+                  type: "string",
+                  description: "The search query",
+                },
+              },
+              required: ["query"],
+            },
+          },
+        ],
+        messages: [
+          {
+            role: "user",
+            content: `${companyName}という企業について、企業概要、業種、事業内容、財務情報（売上、営業利益）、代表者名、設立年を簡潔に日本語で教えてください。`,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      console.log(`Claude API error: ${response.status}`);
+      return "";
+    }
+
+    const data = await response.json() as { content: Array<{ type: string; text?: string }> };
+    const textContent = data.content?.find((c) => c.type === "text");
+    return textContent?.text || "";
+  } catch (error) {
+    console.log("Claude API error:", error);
+    return "";
+  }
+}
+
 // Wikipedia API から企業情報を取得
 async function getWikipediaInfo(companyName: string): Promise<string> {
   try {
@@ -50,7 +108,7 @@ async function getWikipediaInfo(companyName: string): Promise<string> {
     const data = (await response.json()) as { extract?: string };
     return data.extract || "";
   } catch (error) {
-    console.log("Wikipedia API エラー:", error);
+    console.log("Wikipedia API error:", error);
     return "";
   }
 }
@@ -351,23 +409,34 @@ ${wikipediaText.substring(0, 500)}
 }
 
 export async function POST(request: Request) {
-  const body = await request.json();
-  const companyName = body.companyName || "";
-
-  if (!companyName.trim()) {
-    return Response.json({ error: "企業名を入力してください" }, { status: 400 });
-  }
-
   try {
+    const body = await request.json() as { companyName?: string };
+    // JSONパース後、companyName が "???" の場合は別途処理
+    let companyName = (body.companyName || "").trim();
+
+    // フォールバック: request 本体から手動抽出
+    if (!companyName || companyName === "???") {
+      try {
+        const text = await request.clone().text();
+        const match = text.match(/"companyName"\s*:\s*"([^"]+)"/);
+        if (match && match[1]) {
+          companyName = match[1].trim();
+        }
+      } catch (e) {
+        // 無視
+      }
+    }
+
+    if (!companyName) {
+      const errorData = { error: "企業名を入力してください" };
+      return new Response(JSON.stringify(errorData), {
+        status: 400,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+
     console.log("📝 企業名:", companyName);
     console.log("🔍 企業情報を検索中...");
-
-    // Wikipedia から情報を取得
-    const wikipediaInfo = await getWikipediaInfo(companyName);
-
-    console.log("✅ 情報取得完了");
-
-    const searchSummary = generateCompanyReport(companyName, wikipediaInfo);
 
     // 企業名の正規化
     const aliasMap: Record<string, string> = {
@@ -382,28 +451,56 @@ export async function POST(request: Request) {
     };
 
     const normalizedName = aliasMap[companyName] || companyName;
-    const companyData =
-      companyDatabase[normalizedName] ||
-      companyDatabase[
-        Object.keys(companyDatabase).find(
-          (k) => k.toLowerCase() === companyName.toLowerCase()
-        ) || ""
-      ];
+    let companyData = companyDatabase[normalizedName];
 
-    return Response.json({
+    // 直接マッチなければ大文字小文字を無視して検索
+    if (!companyData) {
+      const key = Object.keys(companyDatabase).find(
+        (k) => k.toLowerCase() === companyName.toLowerCase()
+      );
+      if (key) {
+        companyData = companyDatabase[key];
+      }
+    }
+
+    let searchSummary: string;
+
+    if (companyData) {
+      // モックデータベースから取得
+      searchSummary = generateCompanyReport(companyName, "");
+    } else {
+      // Claude API で検索
+      console.log("🤖 Claude API で企業情報を検索中...");
+      const claudeInfo = await searchWithClaude(companyName);
+
+      if (!claudeInfo) {
+        // Claude API が失敗した場合は Wikipedia を試す
+        console.log("📖 Wikipedia で企業情報を検索中...");
+        const wikipediaInfo = await getWikipediaInfo(companyName);
+        searchSummary = generateCompanyReport(companyName, wikipediaInfo);
+      } else {
+        searchSummary = generateCompanyReport(companyName, claudeInfo);
+      }
+    }
+
+    console.log("✅ 情報取得完了");
+
+    const responseData = {
       id: Math.floor(Math.random() * 10000),
       company_name: companyName,
       company_name_kana: companyData?.overview?.substring(0, 10) || "",
       industry: companyData?.industry || "",
-      establishment_date: companyData
-        ? `${companyData.foundedYear}年`
-        : "",
+      establishment_date: companyData ? `${companyData.foundedYear}年` : "",
       representative_name: companyData?.representative || "",
       latest_revenue_billion: companyData
-        ? companyData.financials.revenue[companyData.financials.revenue.length - 1]
+        ? companyData.financials.revenue[
+            companyData.financials.revenue.length - 1
+          ]
         : 0,
       latest_revenue_year: companyData
-        ? companyData.financials.years[companyData.financials.years.length - 1]
+        ? companyData.financials.years[
+            companyData.financials.years.length - 1
+          ]
         : 0,
       latest_profit_billion: companyData
         ? companyData.financials.operatingProfit[
@@ -411,11 +508,18 @@ export async function POST(request: Request) {
           ]
         : 0,
       latest_profit_year: companyData
-        ? companyData.financials.years[companyData.financials.years.length - 1]
+        ? companyData.financials.years[
+            companyData.financials.years.length - 1
+          ]
         : 0,
       search_summary: searchSummary,
       report_status: "completed",
       created_at: new Date().toISOString(),
+    };
+
+    return new Response(JSON.stringify(responseData), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
     });
   } catch (error) {
     console.error("API Error:", error);
@@ -423,23 +527,11 @@ export async function POST(request: Request) {
       error instanceof Error ? error.message : "企業調査に失敗しました";
     console.error("詳細:", errorMessage);
 
-    return Response.json(
-      {
-        error: errorMessage,
-      },
-      { status: 500 }
-    );
+    const errorData = { error: errorMessage };
+    return new Response(JSON.stringify(errorData), {
+      status: 500,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    });
   }
 }
 
-// ヘルパー関数：テキストから年号を抽出
-function extractYear(text: string): string {
-  const match = text.match(/(\d{4})年/);
-  return match ? `${match[1]}年` : "";
-}
-
-// ヘルパー関数：テキストから人名を抽出
-function extractName(text: string): string {
-  const match = text.match(/代表[者:：]([^\n。、、]+)/);
-  return match ? match[1] : "";
-}
