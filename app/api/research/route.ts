@@ -34,65 +34,388 @@ interface CompanyInfo {
   representative: string;
 }
 
-// Claude API を使って企業情報を検索
-async function searchWithClaude(companyName: string): Promise<string> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    console.log("Claude API key not found");
-    return "";
+// ── Claude API (web_search) 設定 ─────────────────────────────
+// claude-3-5-sonnet-20241022: web_search_20250305 に対応しつつ、
+// レスポンス時間の目安（10秒以内）を満たしやすい速度重視モデル。
+// 品質を優先する場合は claude-opus-4-1-20250805 に切り替え可能。
+const CLAUDE_MODEL = "claude-3-5-sonnet-20241022";
+const CLAUDE_API_VERSION = "2023-06-01";
+const CLAUDE_API_URL = "https://api.anthropic.com/v1/messages";
+// web_search はサーバー側（Anthropic側）で実行されるため、通常のカスタムツールのような
+// tool_use → tool_result の往復をこちらで組み立てる必要はない。
+// ただし検索に時間がかかる場合、API が stop_reason: "pause_turn" を返し、
+// 直前の assistant メッセージをそのまま送り返して継続する必要がある。
+// そのための再送回数の上限（初回 + 追加リクエスト）。
+const MAX_PAUSE_CONTINUATIONS = 1;
+// searchWithClaude 全体（初回＋pause_turn再送含む）にかける時間予算（ミリ秒）
+const CLAUDE_TIME_BUDGET_MS = 9000;
+
+interface ClaudeContentBlock {
+  type: string;
+  text?: string;
+  [key: string]: unknown;
+}
+
+interface ClaudeMessageResponse {
+  content: ClaudeContentBlock[];
+  stop_reason: string;
+}
+
+async function callClaudeMessages(
+  messages: Array<{ role: string; content: unknown }>,
+  apiKey: string,
+  signal: AbortSignal,
+  useWebSearch = true
+): Promise<ClaudeMessageResponse | null> {
+  const tools = useWebSearch
+    ? [
+        {
+          type: "web_search_20250305",
+          name: "web_search",
+          max_uses: 4,
+        },
+      ]
+    : [];
+
+  const response = await fetch(CLAUDE_API_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": CLAUDE_API_VERSION,
+    },
+    body: JSON.stringify({
+      model: CLAUDE_MODEL,
+      max_tokens: 3000,
+      tools,
+      messages,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    console.log(`Claude API error: ${response.status} ${errText}`);
+    return null;
   }
 
-  try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-opus-4-1-20250805",
-        max_tokens: 1024,
-        tools: [
-          {
-            name: "web_search",
-            description: "Search the web for information",
-            input_schema: {
-              type: "object",
-              properties: {
-                query: {
-                  type: "string",
-                  description: "The search query",
-                },
-              },
-              required: ["query"],
-            },
-          },
-        ],
-        messages: [
-          {
-            role: "user",
-            content: `${companyName}という企業について、企業概要、業種、事業内容、財務情報（売上、営業利益）、代表者名、設立年を簡潔に日本語で教えてください。`,
-          },
-        ],
-      }),
-    });
+  return (await response.json()) as ClaudeMessageResponse;
+}
 
-    if (!response.ok) {
-      console.log(`Claude API error: ${response.status}`);
-      return "";
+// content 配列からテキストブロックだけを抽出して連結する
+// （server_tool_use / web_search_tool_result などのブロックは無視する）
+function extractText(content: ClaudeContentBlock[]): string {
+  return content
+    .filter((block) => block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text as string)
+    .join("\n");
+}
+
+// テキストの中からJSONオブジェクトを抽出する。
+// ```json ... ``` フェンスを優先し、無ければ最初の { から対応する } までを
+// ブレースの深さをカウントして取り出す（前後に説明文が付いた場合の保険）。
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const fenceMatch =
+    text.match(/```json\s*([\s\S]*?)```/i) || text.match(/```\s*([\s\S]*?)```/);
+  const candidate = fenceMatch ? fenceMatch[1] : text;
+
+  const start = candidate.indexOf("{");
+  if (start === -1) return null;
+
+  let depth = 0;
+  for (let i = start; i < candidate.length; i++) {
+    if (candidate[i] === "{") depth++;
+    else if (candidate[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        const jsonStr = candidate.substring(start, i + 1);
+        try {
+          return JSON.parse(jsonStr) as Record<string, unknown>;
+        } catch {
+          return null;
+        }
+      }
     }
+  }
+  return null;
+}
 
-    const data = await response.json() as { content: Array<{ type: string; text?: string }> };
-    const textContent = data.content?.find((c) => c.type === "text");
-    return textContent?.text || "";
-  } catch (error) {
-    console.log("Claude API error:", error);
-    return "";
+// Claude が返した生JSONを型安全な CompanyInfo に正規化する。
+// 不明・欠損値は文字列なら空文字、数値なら0、配列なら空配列にフォールバックし、
+// 万一想定外の型が返ってきてもダウンストリームの描画が壊れないようにする。
+function normalizeClaudeCompanyData(raw: Record<string, unknown>): CompanyInfo {
+  const asString = (v: unknown): string => (typeof v === "string" ? v : "");
+  const asNumber = (v: unknown): number =>
+    typeof v === "number" && Number.isFinite(v) ? v : 0;
+  const asNumberArray = (v: unknown): number[] =>
+    Array.isArray(v)
+      ? v.filter((x): x is number => typeof x === "number" && Number.isFinite(x))
+      : [];
+  const asStringArray = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+
+  const financialsRaw = (raw.financials as Record<string, unknown>) || {};
+  const reviewRaw = (raw.review as Record<string, unknown>) || {};
+
+  const years = asNumberArray(financialsRaw.years);
+  const revenue = asNumberArray(financialsRaw.revenue);
+  const operatingProfit = asNumberArray(financialsRaw.operatingProfit);
+  const netProfit = asNumberArray(financialsRaw.netProfit);
+  const employees = asNumberArray(financialsRaw.employees);
+
+  // 配列長が不揃いだと年度と数値がずれて表示されるため、最短の長さに揃える
+  const lengths = [years.length, revenue.length, operatingProfit.length, netProfit.length, employees.length];
+  const safeLen = revenue.length > 0 ? Math.min(...lengths) : 0;
+
+  return {
+    overview: asString(raw.overview),
+    industry: asString(raw.industry),
+    foundedYear: asNumber(raw.foundedYear),
+    representative: asString(raw.representative),
+    business: asString(raw.business),
+    recruiting: asString(raw.recruiting),
+    culture: asString(raw.culture),
+    evaluation: asString(raw.evaluation),
+    appeal: asString(raw.appeal),
+    concerns: asString(raw.concerns),
+    financials: {
+      years: years.slice(0, safeLen),
+      revenue: revenue.slice(0, safeLen),
+      operatingProfit: operatingProfit.slice(0, safeLen),
+      netProfit: netProfit.slice(0, safeLen),
+      employees: employees.slice(0, safeLen),
+    },
+    review: {
+      rating: asNumber(reviewRaw.rating),
+      strengths: asStringArray(reviewRaw.strengths),
+      weaknesses: asStringArray(reviewRaw.weaknesses),
+      workLifeBalance: asString(reviewRaw.workLifeBalance),
+      careerGrowth: asString(reviewRaw.careerGrowth),
+    },
+    competitors: asString(raw.competitors),
+    differentiation: asString(raw.differentiation),
+    futureStrategy: asString(raw.futureStrategy),
+  };
+}
+
+function buildResearchPrompt(companyName: string): string {
+  return `【重要】最後に「JSON のみを出力」してください。JSON以外のテキストを付けないこと。
+
+あなたは企業リサーチのアシスタントです。web_searchツールを使って「${companyName}」という企業の最新情報を検索してください。
+
+【検索戦略 - 必ず実行すること】
+必ず以下のキーワードで複数回検索し、漏らさず情報を集めてから JSON を出力してください：
+1. 企業概要・基本情報：「${companyName} 企業」「${companyName} 会社概要」
+2. 業種・事業内容：「${companyName} 業種」「${companyName} 事業内容」
+3. 設立年・代表者：「${companyName} 設立年」「${companyName} 設立年月日」「${companyName} 代表取締役」「${companyName} CEO」
+4. 財務情報：「${companyName} 売上」「${companyName} 営業利益」「${companyName} 従業員数」「${companyName} 決算」
+
+【出力ルール】
+- 最後に JSON オブジェクト1つのみを出力。JSON 以外のテキストは 絶対に 付けないこと
+- 検索で確認できなかった項目は：文字列は空文字 ""、数値は 0、配列は空配列 [] にすること
+- 事実確認できた情報だけを記載し、推測・作成・省略はしないこと
+- foundedYear：西暦（例：1946）。判明しなければ 0
+- representative：代表取締役名など最高経営責任者の名前のみ
+- financials.years/revenue/operatingProfit/netProfit/employees：全て同じ配列長。年度は古い順に。金額の単位は「億円」
+- financials：判明した直近 1～3 期のデータのみ記載（未来予想は除外）
+
+出力するJSONのフォーマット（この構造を厳守すること）：
+{
+  "overview": "",
+  "industry": "",
+  "foundedYear": 0,
+  "representative": "",
+  "business": "",
+  "recruiting": "",
+  "culture": "",
+  "evaluation": "",
+  "appeal": "",
+  "concerns": "",
+  "financials": {
+    "years": [],
+    "revenue": [],
+    "operatingProfit": [],
+    "netProfit": [],
+    "employees": []
+  },
+  "review": {
+    "rating": 0,
+    "strengths": [],
+    "weaknesses": [],
+    "workLifeBalance": "",
+    "careerGrowth": ""
+  },
+  "competitors": "",
+  "differentiation": "",
+  "futureStrategy": ""
+}`;
+}
+
+// 取得した企業データで重要フィールドが空かどうかを判定
+function hasCriticalDataGaps(data: CompanyInfo): boolean {
+  const gaps = {
+    industry: !data.industry || data.industry.trim() === "",
+    foundedYear: data.foundedYear === 0,
+    representative: !data.representative || data.representative.trim() === "",
+    businessInfo: !data.business || data.business.trim() === "",
+  };
+
+  // 3つ以上欠けている場合は「重要フィールドに穴がある」と判定
+  const gapCount = Object.values(gaps).filter(Boolean).length;
+  console.log(
+    `📊 データギャップ分析：industry=${gaps.industry}, foundedYear=${gaps.foundedYear}, representative=${gaps.representative}, business=${gaps.businessInfo} (計${gapCount}個欠落)`
+  );
+  return gapCount >= 3;
+}
+
+// 補完クエリ：重要フィールドが足りない場合、別途検索させる
+function buildFollowupPrompt(companyName: string, partialData: CompanyInfo): string {
+  const missingFields: string[] = [];
+  if (!partialData.industry) missingFields.push("業種");
+  if (partialData.foundedYear === 0) missingFields.push("設立年");
+  if (!partialData.representative) missingFields.push("代表取締役名");
+  if (!partialData.business) missingFields.push("事業内容");
+
+  return `前回の検索では「${missingFields.join("、")}」が取得できませんでした。
+「${companyName}」の企業について、以下の情報を web_search で改めて検索して、必ず確認してください：
+
+【優先検索キーワード】
+- 「${companyName} 業種」「${companyName} 事業」
+- 「${companyName} 設立年」「${companyName} 設立年月日」
+- 「${companyName} 代表」「${companyName} 代表取締役」「${companyName} CEO」
+- 「${companyName} 売上」「${companyName} 従業員」
+
+検索結果から確認できた情報について、以下のJSON（指定フィールドのみ）を出力してください：
+{
+  "industry": "",
+  "foundedYear": 0,
+  "representative": "",
+  "business": "",
+  "financials": {
+    "years": [],
+    "revenue": [],
+    "operatingProfit": [],
+    "netProfit": [],
+    "employees": []
   }
 }
 
-// Wikipedia API から企業情報を取得
+【重要】
+- 出力は JSON のみ。説明文は付けないこと
+- 判明した情報だけを記載。推測は絶対にしないこと
+- foundedYear は西暦の数字のみ（例：1946）。判明しなければ 0
+- 金額の単位は「億円」`;
+}
+
+// Claude API + web_search ツールを使って企業情報をリアルタイム検索し、構造化データを返す
+async function searchWithClaude(companyName: string): Promise<CompanyInfo | null> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.log("Claude API key not found");
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), CLAUDE_TIME_BUDGET_MS);
+
+  try {
+    // ━━━━━━━ ステップ1：初期検索 ━━━━━━━
+    let messages: Array<{ role: string; content: unknown }> = [
+      { role: "user", content: buildResearchPrompt(companyName) },
+    ];
+
+    let finalResponse: ClaudeMessageResponse | null = null;
+
+    for (let attempt = 0; attempt <= MAX_PAUSE_CONTINUATIONS; attempt++) {
+      const result = await callClaudeMessages(messages, apiKey, controller.signal);
+      if (!result) {
+        return null;
+      }
+
+      finalResponse = result;
+
+      if (result.stop_reason !== "pause_turn") {
+        break;
+      }
+
+      // 検索継続: 直前の assistant メッセージ（encrypted_content を含む）をそのまま送り返す
+      messages = [...messages, { role: "assistant", content: result.content }];
+    }
+
+    if (!finalResponse) {
+      return null;
+    }
+
+    const text = extractText(finalResponse.content);
+    const json = extractJsonObject(text);
+    if (!json) {
+      console.log("Claude response did not contain parseable JSON");
+      return null;
+    }
+
+    let companyData = normalizeClaudeCompanyData(json);
+
+    // ━━━━━━━ ステップ2：検証と補完 ━━━━━━━
+    if (hasCriticalDataGaps(companyData)) {
+      console.log("⚠️  重要フィールドに穴があります。フォローアップ検索を実施...");
+
+      // 補完クエリで再検索
+      const followupMessages: Array<{ role: string; content: unknown }> = [
+        ...messages,
+        { role: "assistant", content: finalResponse.content },
+        { role: "user", content: buildFollowupPrompt(companyName, companyData) },
+      ];
+
+      const followupResult = await callClaudeMessages(
+        followupMessages,
+        apiKey,
+        controller.signal
+      );
+      if (followupResult) {
+        const followupText = extractText(followupResult.content);
+        const followupJson = extractJsonObject(followupText);
+        if (followupJson) {
+          console.log("✅ フォローアップ検索でデータを補完しました");
+          // 型安全にマージ
+          const safeFollowup = normalizeClaudeCompanyData(followupJson);
+          companyData = {
+            ...companyData,
+            industry: safeFollowup.industry || companyData.industry,
+            foundedYear: safeFollowup.foundedYear || companyData.foundedYear,
+            representative: safeFollowup.representative || companyData.representative,
+            business: safeFollowup.business || companyData.business,
+            financials: {
+              years: safeFollowup.financials.years.length
+                ? safeFollowup.financials.years
+                : companyData.financials.years,
+              revenue: safeFollowup.financials.revenue.length
+                ? safeFollowup.financials.revenue
+                : companyData.financials.revenue,
+              operatingProfit: safeFollowup.financials.operatingProfit.length
+                ? safeFollowup.financials.operatingProfit
+                : companyData.financials.operatingProfit,
+              netProfit: safeFollowup.financials.netProfit.length
+                ? safeFollowup.financials.netProfit
+                : companyData.financials.netProfit,
+              employees: safeFollowup.financials.employees.length
+                ? safeFollowup.financials.employees
+                : companyData.financials.employees,
+            },
+          };
+        }
+      }
+    }
+
+    return companyData;
+  } catch (error) {
+    console.log("Claude API error:", error);
+    return null;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+// Wikipedia API から企業情報を取得（Claude API が使えない場合の最終フォールバック）
 async function getWikipediaInfo(companyName: string): Promise<string> {
   try {
     const response = await fetch(
@@ -270,113 +593,100 @@ const companyDatabase: Record<string, CompanyInfo> = {
   },
 };
 
-// 企業データを生成
-function generateCompanyReport(
-  companyName: string,
-  wikipediaText: string
+function orFallback(
+  value: string,
+  fallback = "情報が確認できませんでした。公式サイト等でご確認ください。"
 ): string {
-  // 企業名の正規化と別名対応
-  const aliasMap: Record<string, string> = {
-    ソニー: "ソニー",
-    Sony: "ソニー",
-    トヨタ: "トヨタ自動車",
-    トヨタ自動車: "トヨタ自動車",
-    Toyota: "トヨタ自動車",
-    日銀: "日本銀行",
-    BOJ: "日本銀行",
-    日本銀行: "日本銀行",
+  return value && value.trim() ? value : fallback;
+}
+
+function formatFinancials(financials: CompanyFinancials): string {
+  if (!financials.revenue.length) {
+    return "  財務データを検索結果から特定できませんでした。IR資料・決算短信をご確認ください。";
+  }
+
+  const years = financials.years;
+  const buildLine = (label: string, values: number[], unit: string): string => {
+    if (!values.length) return `  • ${label}：データなし`;
+    const parts = values.map((v, i) => `${years[i] ?? "?"}年: ${v}${unit}`);
+    return `  • ${label}：${parts.join(" → ")}`;
   };
 
-  let normalizedName = aliasMap[companyName] || companyName;
-  let data: CompanyInfo | undefined = companyDatabase[normalizedName];
+  const employeesInThousands = financials.employees.map((e) =>
+    Number((e / 1000).toFixed(0))
+  );
 
-  // 直接マッチなければ大文字小文字を無視して検索
-  if (!data) {
-    const key = Object.keys(companyDatabase).find(
-      (k) => k.toLowerCase() === companyName.toLowerCase()
-    );
-    if (key) {
-      data = companyDatabase[key];
-    }
+  return [
+    buildLine("売上推移", financials.revenue, "億円"),
+    buildLine("営業利益推移", financials.operatingProfit, "億円"),
+    buildLine("従業員数推移", employeesInThousands, "k人"),
+  ].join("\n");
+}
+
+function formatReview(review: CompanyReview): string {
+  if (!review.rating && review.strengths.length === 0 && review.weaknesses.length === 0) {
+    return "  口コミ・評判に関する情報は見つかりませんでした。OpenWork等の口コミサイトでご確認ください。";
   }
 
-  // データベースにない場合は Wikipedia テキストから生成
-  if (!data) {
-    return generateFromWikipedia(companyName, wikipediaText);
-  }
+  return [
+    `  • 総合評価：${review.rating ? `${review.rating}/5.0` : "不明"}`,
+    `  • 強み：${review.strengths.length ? review.strengths.join("、") : "情報なし"}`,
+    `  • 改善点：${review.weaknesses.length ? review.weaknesses.join("、") : "情報なし"}`,
+    `  • ワークライフバランス：${review.workLifeBalance || "情報なし"}`,
+    `  • キャリア成長：${review.careerGrowth || "情報なし"}`,
+  ].join("\n");
+}
 
-  const financialSummary = `
-  • 売上推移：${data.financials.revenue
-    .slice(0, -1)
-    .map((r, i) => `${data.financials.years[i]}年: ${r}億円`)
-    .join(" → ")} → ${data.financials.revenue[data.financials.revenue.length - 1]}億円（予想）
-  • 営業利益推移：${data.financials.operatingProfit
-    .slice(0, -1)
-    .map((p, i) => `${data.financials.years[i]}年: ${p}億円`)
-    .join(" → ")} → ${data.financials.operatingProfit[data.financials.operatingProfit.length - 1]}億円（予想）
-  • 従業員数推移：${data.financials.employees
-    .slice(0, -1)
-    .map((e, i) => `${data.financials.years[i]}年: ${(e / 1000).toFixed(0)}k人`)
-    .join(" → ")} → ${(data.financials.employees[data.financials.employees.length - 1] / 1000).toFixed(0)}k人（予想）`;
-
-  const reviewSummary = `
-  • 総合評価：${data.review.rating}/5.0
-  • 強み：${data.review.strengths.join("、")}
-  • 改善点：${data.review.weaknesses.join("、")}
-  • ワークライフバランス：${data.review.workLifeBalance}
-  • キャリア成長：${data.review.careerGrowth}`;
-
+// モックデータベース／Claude構造化データ どちらの CompanyInfo からもレポートを生成する共通関数
+function buildReportText(companyName: string, data: CompanyInfo): string {
   return `【${companyName} 企業調査レポート】
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【企業概要】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${data.overview}
+${orFallback(data.overview)}
 
 【事業内容・サービス】
-${data.business}
+${orFallback(data.business)}
 
 【採用情報】
-${data.recruiting}
+${orFallback(data.recruiting)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【財務分析・経営状況】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${financialSummary}
+${formatFinancials(data.financials)}
 
 【今後の経営戦略・注力事業】
-${data.futureStrategy}
+${orFallback(data.futureStrategy)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 【社風・カルチャー（口コミ分析）】
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
-${reviewSummary}
+${formatReview(data.review)}
 
 【競合分析・差別化ポイント】
-同業他社：${data.competitors}
+同業他社：${orFallback(data.competitors, "情報が見つかりませんでした。")}
 
 差別化ポイント：
-${data.differentiation}
+${orFallback(data.differentiation)}
 
 【転職市場での評判】
-${data.evaluation}
+${orFallback(data.evaluation)}
 
 【求職者にとっての魅力】
-${data.appeal}
+${orFallback(data.appeal)}
 
 【懸念点・注意事項】
-${data.concerns}
+${orFallback(data.concerns)}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━
 本レポートは公開情報を基に作成しています。
 最新情報は公式サイト・決算資料でご確認ください。`;
 }
 
-// Wikipedia テキストからレポート生成
-function generateFromWikipedia(
-  companyName: string,
-  wikipediaText: string
-): string {
+// Wikipedia テキストからのレポート生成（Claude APIキー未設定・検索失敗時の最終フォールバック）
+function generateFromWikipedia(companyName: string, wikipediaText: string): string {
   if (!wikipediaText) {
     return `【${companyName} 企業調査レポート】
 
@@ -408,9 +718,36 @@ ${wikipediaText.substring(0, 500)}
 本レポートは公開情報を基に作成しています。`;
 }
 
+const aliasMap: Record<string, string> = {
+  ソニー: "ソニー",
+  Sony: "ソニー",
+  トヨタ: "トヨタ自動車",
+  トヨタ自動車: "トヨタ自動車",
+  Toyota: "トヨタ自動車",
+  日銀: "日本銀行",
+  BOJ: "日本銀行",
+  日本銀行: "日本銀行",
+};
+
+function lookupCompanyDatabase(companyName: string): CompanyInfo | undefined {
+  const normalizedName = aliasMap[companyName] || companyName;
+  let data = companyDatabase[normalizedName];
+
+  if (!data) {
+    const key = Object.keys(companyDatabase).find(
+      (k) => k.toLowerCase() === companyName.toLowerCase()
+    );
+    if (key) {
+      data = companyDatabase[key];
+    }
+  }
+
+  return data;
+}
+
 export async function POST(request: Request) {
   try {
-    const body = await request.json() as { companyName?: string };
+    const body = (await request.json()) as { companyName?: string };
     // JSONパース後、companyName が "???" の場合は別途処理
     let companyName = (body.companyName || "").trim();
 
@@ -422,7 +759,7 @@ export async function POST(request: Request) {
         if (match && match[1]) {
           companyName = match[1].trim();
         }
-      } catch (e) {
+      } catch {
         // 無視
       }
     }
@@ -438,80 +775,66 @@ export async function POST(request: Request) {
     console.log("📝 企業名:", companyName);
     console.log("🔍 企業情報を検索中...");
 
-    // 企業名の正規化
-    const aliasMap: Record<string, string> = {
-      ソニー: "ソニー",
-      Sony: "ソニー",
-      トヨタ: "トヨタ自動車",
-      トヨタ自動車: "トヨタ自動車",
-      Toyota: "トヨタ自動車",
-      日銀: "日本銀行",
-      BOJ: "日本銀行",
-      日本銀行: "日本銀行",
-    };
-
-    const normalizedName = aliasMap[companyName] || companyName;
-    let companyData = companyDatabase[normalizedName];
-
-    // 直接マッチなければ大文字小文字を無視して検索
-    if (!companyData) {
-      const key = Object.keys(companyDatabase).find(
-        (k) => k.toLowerCase() === companyName.toLowerCase()
-      );
-      if (key) {
-        companyData = companyDatabase[key];
-      }
-    }
+    const companyData = lookupCompanyDatabase(companyName);
 
     let searchSummary: string;
+    let effectiveData: CompanyInfo | undefined = companyData;
 
     if (companyData) {
       // モックデータベースから取得
-      searchSummary = generateCompanyReport(companyName, "");
+      searchSummary = buildReportText(companyName, companyData);
     } else {
-      // Claude API で検索
-      console.log("🤖 Claude API で企業情報を検索中...");
-      const claudeInfo = await searchWithClaude(companyName);
+      // Claude API + web_search でリアルタイム検索
+      console.log("🤖 Claude API (web_search) で企業情報を検索中...");
+      const claudeData = await searchWithClaude(companyName);
 
-      if (!claudeInfo) {
-        // Claude API が失敗した場合は Wikipedia を試す
+      const hasUsefulData =
+        !!claudeData &&
+        (claudeData.overview.length > 0 ||
+          claudeData.industry.length > 0 ||
+          claudeData.business.length > 0 ||
+          claudeData.financials.revenue.length > 0);
+
+      if (hasUsefulData && claudeData) {
+        effectiveData = claudeData;
+        searchSummary = buildReportText(companyName, claudeData);
+      } else {
+        // Claude API が失敗、またはJSONが空だった場合は Wikipedia を試す
         console.log("📖 Wikipedia で企業情報を検索中...");
         const wikipediaInfo = await getWikipediaInfo(companyName);
-        searchSummary = generateCompanyReport(companyName, wikipediaInfo);
-      } else {
-        searchSummary = generateCompanyReport(companyName, claudeInfo);
+        searchSummary = generateFromWikipedia(companyName, wikipediaInfo);
       }
     }
 
     console.log("✅ 情報取得完了");
 
+    const financials = effectiveData?.financials;
+    const lastRevenue =
+      financials && financials.revenue.length
+        ? financials.revenue[financials.revenue.length - 1]
+        : 0;
+    const lastOperatingProfit =
+      financials && financials.operatingProfit.length
+        ? financials.operatingProfit[financials.operatingProfit.length - 1]
+        : 0;
+    const lastYear =
+      financials && financials.years.length
+        ? financials.years[financials.years.length - 1]
+        : 0;
+
     const responseData = {
       id: Math.floor(Math.random() * 10000),
       company_name: companyName,
-      company_name_kana: companyData?.overview?.substring(0, 10) || "",
-      industry: companyData?.industry || "",
-      establishment_date: companyData ? `${companyData.foundedYear}年` : "",
-      representative_name: companyData?.representative || "",
-      latest_revenue_billion: companyData
-        ? companyData.financials.revenue[
-            companyData.financials.revenue.length - 1
-          ]
-        : 0,
-      latest_revenue_year: companyData
-        ? companyData.financials.years[
-            companyData.financials.years.length - 1
-          ]
-        : 0,
-      latest_profit_billion: companyData
-        ? companyData.financials.operatingProfit[
-            companyData.financials.operatingProfit.length - 1
-          ]
-        : 0,
-      latest_profit_year: companyData
-        ? companyData.financials.years[
-            companyData.financials.years.length - 1
-          ]
-        : 0,
+      company_name_kana: effectiveData?.overview?.substring(0, 10) || "",
+      industry: effectiveData?.industry || "",
+      establishment_date: effectiveData?.foundedYear
+        ? `${effectiveData.foundedYear}年`
+        : "",
+      representative_name: effectiveData?.representative || "",
+      latest_revenue_billion: lastRevenue,
+      latest_revenue_year: lastYear,
+      latest_profit_billion: lastOperatingProfit,
+      latest_profit_year: lastYear,
       search_summary: searchSummary,
       report_status: "completed",
       created_at: new Date().toISOString(),
@@ -534,4 +857,3 @@ export async function POST(request: Request) {
     });
   }
 }
-
